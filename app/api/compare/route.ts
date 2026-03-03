@@ -1,48 +1,66 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 
 export async function POST(req: NextRequest) {
   const { prompt, models } = await req.json();
 
   if (!prompt || !models || models.length === 0) {
-    return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+    return new Response(JSON.stringify({ error: "Invalid request" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
-  const results = await Promise.allSettled(
-    models.map((modelId: string) => callOpenRouter(modelId, prompt)),
-  );
+  const encoder = new TextEncoder();
 
-  const responses: Record<
-    string,
-    { text?: string; error?: string; latency: number; tokens: number }
-  > = {};
-
-  results.forEach((result, index) => {
-    const modelId = models[index];
-    if (result.status === "fulfilled") {
-      responses[modelId] = result.value;
-    } else {
-      responses[modelId] = {
-        error: result.reason?.message || "Failed",
-        latency: 0,
-        tokens: 0,
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (data: object) => {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(data)}\n\n`),
+        );
       };
-    }
+
+      // Call all models in parallel, streaming chunks as they arrive
+      await Promise.allSettled(
+        models.map(async (modelId: string) => {
+          try {
+            await streamOpenRouter(modelId, prompt, (chunk) => {
+              send({ modelId, type: "chunk", text: chunk });
+            });
+            send({ modelId, type: "done" });
+          } catch (err) {
+            send({
+              modelId,
+              type: "error",
+              error: err instanceof Error ? err.message : "Unknown error",
+            });
+          }
+        }),
+      );
+
+      send({ type: "complete" });
+      controller.close();
+    },
   });
 
-  return NextResponse.json(responses);
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }
 
-async function callOpenRouter(
+async function streamOpenRouter(
   modelId: string,
   prompt: string,
-  retries = 2,
-): Promise<{ text: string; latency: number; tokens: number }> {
+  onChunk: (text: string) => void,
+) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
     throw new Error("OPENROUTER_API_KEY is not set in .env.local");
   }
-
-  const start = Date.now();
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -56,35 +74,46 @@ async function callOpenRouter(
       model: modelId,
       messages: [{ role: "user", content: prompt }],
       max_tokens: 1000,
+      stream: true,
     }),
   });
 
-  const data = await res.json();
-
-  // Check for errors (both HTTP-level and in-body)
-  const error = !res.ok || data?.error;
-  if (error) {
-    const msg =
-      data?.error?.message ||
-      data?.error?.code ||
-      `OpenRouter error (${res.status})`;
-    const isRateLimit = res.status === 429 || data?.error?.code === 429;
-
-    // Retry on rate limits
-    if (isRateLimit && retries > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      return callOpenRouter(modelId, prompt, retries - 1);
-    }
-
-    throw new Error(msg);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      data?.error?.message || `OpenRouter error (${res.status})`,
+    );
   }
 
-  const text = data.choices?.[0]?.message?.content || "";
-  const tokens = data.usage?.total_tokens || 0;
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error("No response body");
 
-  return {
-    text,
-    latency: Date.now() - start,
-    tokens,
-  };
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data: ")) continue;
+      const data = trimmed.slice(6);
+      if (data === "[DONE]") return;
+
+      try {
+        const parsed = JSON.parse(data);
+        const content = parsed.choices?.[0]?.delta?.content;
+        if (content) {
+          onChunk(content);
+        }
+      } catch {
+        // Skip malformed chunks
+      }
+    }
+  }
 }
