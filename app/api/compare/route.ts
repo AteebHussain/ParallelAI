@@ -25,18 +25,21 @@ export async function POST(req: NextRequest) {
   }
 
   // 2. Optional: Basic Origin Check
-  // In development, this won't block localhost. In production, this adds a tiny layer of friction against direct cURL scripts that don't spoof the Origin.
+  // Allow requests from the main domain, Vercel preview deployments, or local development.
   const headersList = await headers();
   const origin = headersList.get("origin") || headersList.get("referer");
-  if (
-    process.env.NODE_ENV === "production" &&
-    origin &&
-    !origin.includes("parallelai.vercel.app")
-  ) {
-    return new Response(JSON.stringify({ error: "Unauthorized Origin" }), {
-      status: 403,
-      headers: { "Content-Type": "application/json" },
-    });
+  
+  if (process.env.NODE_ENV === "production" && origin) {
+    const isAllowedOrigin = 
+      origin.includes("parallelai.vercel.app") || 
+      (origin.includes("vercel.app") && origin.includes("parallel"));
+      
+    if (!isAllowedOrigin) {
+      return new Response(JSON.stringify({ error: "Unauthorized Origin" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
   }
 
   // 3. In-Memory Rate Limiting
