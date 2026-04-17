@@ -22,9 +22,9 @@ export const MODELS: Model[] = [
     bgColor: "bg-emerald-500/10 border-emerald-500/30",
   },
   {
-    id: "minimax/minimax-m2.5:free",
-    name: "MiniMax M2.5",
-    provider: "MiniMax",
+    id: "qwen/qwen3-coder:free",
+    name: "Qwen3 Coder 480B",
+    provider: "Qwen",
     color: "text-violet-400",
     bgColor: "bg-violet-500/10 border-violet-500/30",
   },
